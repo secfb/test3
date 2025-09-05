@@ -20,9 +20,9 @@ LOCK_FILE = "scheduler.lock"
 
 # --- Varsayılan Komut Listesi ---
 DEFAULT_COMMANDS = [
+    "nuclei -etags wordpress,wp-plugin -duc -ni -l httpx.txt -es info,low -o nuclei-script-result.txt -c 300  | tee -a teenuclei-result-script.txt",
     "dddd -ni -t httpx.txt -output-type text -o dddd-scan-script-script-result.txt -html-output dddd-scan-script-result.html | tee -a teedddd-result-script.txt",
-    "afrog -silent -duc -T httpx.txt -S medium,high,critical -o afrog_all-script-result.html -c 200  | tee -a teeafrog-result-script.txt",
-    "nuclei -duc -ni -l httpx.txt -es info,low -o nuclei-script-result.txt -c 100 -etags wordpress,wp-plugin | tee -a teenuclei-result-script.txt"
+    "afrog -silent -duc -T httpx.txt -S medium,high,critical -o afrog_all-script-result.html -c 200  | tee -a teeafrog-result-script.txt"
 ]
 # --- Loglama Kurulumu (Global Fonksiyon)---
 def setup_logging(log_file):
@@ -104,17 +104,20 @@ class CommandScheduler:
     def _load_config(self):
         """Yapılandırmayı JSON dosyasından yükler ve varsayılanlarla birleştirir."""
         default_config = {
-            "STATE_FILE": "scheduler_state.json",
-            "LOG_FILE": "scheduler.log",
-            "COMMAND_OUTPUT_LOG_FILE": "command_outputs.log",
-            "ALL_WEEK_SCAN": True,
-            "WEEKEND_SCAN": False,
-            "KILL_ONLY_STARTED_PROCESS": True,
-            "ALL_WEEK_START": "00:00",
-            "ALL_WEEK_END": "07:00",
-            "WEEKEND_START": "00:10",
-            "WEEKEND_END": "07:00",
-            "LOOP_SLEEP_INTERVAL": 15
+            "STATE_FILE": "scheduler_state.json",  # Hangi komutun sırada olduğunu kaydeden dosya
+            "LOG_FILE": "scheduler.log",  # Ana log dosyası
+            "COMMAND_OUTPUT_LOG_FILE": "command_outputs.log",  # Komutların çıktılarını kaydeden dosya
+            "ALL_WEEK_SCAN": False,  # Her gün belirli saatler arası tarama (True yapılırsa aktif olur)
+            "WEEKEND_SCAN": False,  # Cumartesi-Pazartesi arası tarama (True yapılırsa aktif olur)
+            "FRIDAY_TO_MONDAY_SCAN": True,  # Cuma-Pazartesi arası tarama (Şu an aktif)
+            "KILL_ONLY_STARTED_PROCESS": True,  # Sadece script tarafından başlatılan processleri sonlandır
+            "ALL_WEEK_START": "00:00",  # ALL_WEEK_SCAN için günlük başlangıç saati
+            "ALL_WEEK_END": "07:00",  # ALL_WEEK_SCAN için günlük bitiş saati
+            "WEEKEND_START": "00:10",  # WEEKEND_SCAN için Cumartesi başlangıç saati
+            "WEEKEND_END": "07:00",  # WEEKEND_SCAN için Pazartesi bitiş saati
+            "FRIDAY_START": "20:00",  # FRIDAY_TO_MONDAY_SCAN için Cuma başlangıç saati
+            "MONDAY_END": "08:00",  # FRIDAY_TO_MONDAY_SCAN için Pazartesi bitiş saati
+            "LOOP_SLEEP_INTERVAL": 15  # Döngü kontrol aralığı (saniye)
         }
         if os.path.exists(CONFIG_FILE):
             try:
@@ -126,7 +129,7 @@ class CommandScheduler:
                 print(f"UYARI: Config dosyası ({CONFIG_FILE}) okunamadı: {e}. Varsayılanlar kullanılıyor.")
         
         # Zaman string'lerini datetime.time nesnelerine çevir
-        for key in ["ALL_WEEK_START", "ALL_WEEK_END", "WEEKEND_START", "WEEKEND_END"]:
+        for key in ["ALL_WEEK_START", "ALL_WEEK_END", "WEEKEND_START", "WEEKEND_END", "FRIDAY_START", "MONDAY_END"]:
             default_config[key] = datetime.time.fromisoformat(default_config[key])
         return default_config
 
@@ -186,6 +189,18 @@ class CommandScheduler:
             # Pazartesi (0): 07:00'a kadar
             elif weekday == 0:
                 return current_time < self.config["WEEKEND_END"]
+        
+        # FRIDAY_TO_MONDAY_SCAN: Cuma 00:00'dan Pazartesi 08:00'a kadar tarama
+        if self.config["FRIDAY_TO_MONDAY_SCAN"]:
+            # Cuma (4): 00:00'dan sonra
+            if weekday == 4:
+                return current_time >= self.config["FRIDAY_START"]
+            # Cumartesi (5) ve Pazar (6): Tüm gün
+            elif weekday in [5, 6]:
+                return True
+            # Pazartesi (0): 08:00'a kadar
+            elif weekday == 0:
+                return current_time < self.config["MONDAY_END"]
                 
         return False
 
@@ -209,6 +224,9 @@ class CommandScheduler:
             # WEEKEND_SCAN: Sadece Cumartesi başlangıcı
             elif weekday == 5 and self.config["WEEKEND_SCAN"]:
                 start_time = self.config["WEEKEND_START"]
+            # FRIDAY_TO_MONDAY_SCAN: Cuma başlangıcı
+            elif weekday == 4 and self.config["FRIDAY_TO_MONDAY_SCAN"]:
+                start_time = self.config["FRIDAY_START"]
             else:
                 continue
             
@@ -264,6 +282,9 @@ class CommandScheduler:
             # WEEKEND_SCAN: Sadece Cumartesi başlangıcı
             elif weekday == 5 and self.config["WEEKEND_SCAN"]:
                 start_time = self.config["WEEKEND_START"]
+            # FRIDAY_TO_MONDAY_SCAN: Cuma başlangıcı
+            elif weekday == 4 and self.config["FRIDAY_TO_MONDAY_SCAN"]:
+                start_time = self.config["FRIDAY_START"]
             
             if start_time:
                 next_start_dt = datetime.datetime.combine(day_to_check, start_time)
@@ -294,6 +315,25 @@ class CommandScheduler:
             # Pazartesi 07:00'a kadar hafta sonu penceresi
             elif weekday == 0:
                 end_dt = datetime.datetime.combine(now.date(), self.config["WEEKEND_END"])
+                return end_dt if end_dt > now else None
+        
+        # FRIDAY_TO_MONDAY_SCAN kontrolü
+        if self.config["FRIDAY_TO_MONDAY_SCAN"]:
+            # Cuma: Pazartesi 08:00'a kadar devam eder
+            if weekday == 4:
+                end_day = now.date() + datetime.timedelta(days=3)  # Pazartesi
+                return datetime.datetime.combine(end_day, self.config["MONDAY_END"])
+            # Cumartesi: Pazartesi 08:00'a kadar
+            elif weekday == 5:
+                end_day = now.date() + datetime.timedelta(days=2)  # Pazartesi
+                return datetime.datetime.combine(end_day, self.config["MONDAY_END"])
+            # Pazar: Pazartesi 08:00'a kadar
+            elif weekday == 6:
+                end_day = now.date() + datetime.timedelta(days=1)  # Pazartesi
+                return datetime.datetime.combine(end_day, self.config["MONDAY_END"])
+            # Pazartesi 08:00'a kadar
+            elif weekday == 0:
+                end_dt = datetime.datetime.combine(now.date(), self.config["MONDAY_END"])
                 return end_dt if end_dt > now else None
             
         return None
